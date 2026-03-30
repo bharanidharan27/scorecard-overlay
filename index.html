@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Scorecard Overlay</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="overlay-shell">
+      <section class="scoreboard" data-tauri-drag-region>
+        <header class="scoreboard__header">
+          <div>
+            <p class="eyebrow">LIVE IPL OVERLAY</p>
+            <h1 id="match-title">Match Loading</h1>
+          </div>
+          <span class="live-pill">LIVE</span>
+        </header>
+
+        <div class="teams">
+          <article class="team-card team-card--batting">
+            <p class="team-card__label">Batting</p>
+            <div class="team-card__row">
+              <h2 id="batting-team">-</h2>
+              <p id="batting-score" class="team-card__score">0/0</p>
+            </div>
+            <p id="batting-overs" class="team-card__meta">0.0 overs</p>
+          </article>
+
+          <article class="team-card">
+            <p class="team-card__label">Bowling</p>
+            <div class="team-card__row">
+              <h2 id="bowling-team">-</h2>
+              <p id="bowling-score" class="team-card__score">Yet to bat</p>
+            </div>
+            <p id="bowling-overs" class="team-card__meta">Target pending</p>
+          </article>
+        </div>
+
+        <section class="match-strip">
+          <div>
+            <p class="match-strip__label">Current</p>
+            <p id="current-batters" class="match-strip__value">-</p>
+          </div>
+          <div>
+            <p class="match-strip__label">Run Rate</p>
+            <p id="run-rate" class="match-strip__value">-</p>
+          </div>
+          <div>
+            <p class="match-strip__label">Last Over</p>
+            <p id="last-over" class="match-strip__value">-</p>
+          </div>
+        </section>
+
+        <footer class="scoreboard__footer">
+          <p id="match-status">Waiting for score updates...</p>
+          <button id="cycle-match" type="button">Cycle Demo Match</button>
+        </footer>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+  </html>
