@@ -5,15 +5,11 @@ description = "A lightweight always-on-top cricket score overlay"
 authors = ["Codex"]
 edition = "2021"
 
-[lib]
-name = "scorecard_overlay_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2.0.1", features = [] }
 
 [dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.2.5", features = [] }
-
