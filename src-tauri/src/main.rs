@@ -93,17 +93,7 @@ fn normalize_match(raw: &Value) -> OverlayMatch {
     let match_title = get_string(raw, &["name"]);
     let competition = get_string(raw, &["series", "series_id", "matchType"]);
     let status = get_string(raw, &["status"]);
-    let teams = raw
-        .get("teams")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let teams = get_team_labels(raw);
 
     let scores = raw
         .get("score")
@@ -122,7 +112,7 @@ fn normalize_match(raw: &Value) -> OverlayMatch {
         .and_then(|entry| entry.get("inning"))
         .and_then(Value::as_str)
         .map(clean_inning_name)
-        .filter(|name| !name.is_empty())
+        .and_then(|inning| resolve_team_label(&inning, &teams))
         .unwrap_or_else(|| teams.first().cloned().unwrap_or_else(|| "TBD".to_string()));
 
     let batting_score = batting_entry
@@ -194,6 +184,51 @@ fn normalize_match(raw: &Value) -> OverlayMatch {
     }
 }
 
+fn get_team_labels(raw: &Value) -> Vec<String> {
+    if let Some(team_info) = raw.get("teamInfo").and_then(Value::as_array) {
+        let labels = team_info
+            .iter()
+            .filter_map(|team| {
+                team.get("shortname")
+                    .and_then(Value::as_str)
+                    .or_else(|| team.get("name").and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        if !labels.is_empty() {
+            return labels;
+        }
+    }
+
+    raw.get("teams")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn resolve_team_label(inning: &str, teams: &[String]) -> Option<String> {
+    let normalized_inning = inning.to_lowercase();
+
+    teams
+        .iter()
+        .find(|team| {
+            let normalized_team = team.to_lowercase();
+            normalized_inning == normalized_team
+                || normalized_inning.starts_with(&normalized_team)
+                || normalized_team.starts_with(&normalized_inning)
+        })
+        .cloned()
+}
+
 fn get_string(raw: &Value, keys: &[&str]) -> String {
     keys.iter()
         .find_map(|key| raw.get(*key).and_then(Value::as_str))
@@ -206,7 +241,7 @@ fn resolve_bowling_team(other_entry: Option<&Value>, teams: &[String], batting_t
         .and_then(|entry| entry.get("inning"))
         .and_then(Value::as_str)
         .map(clean_inning_name)
-        .filter(|name| !name.is_empty())
+        .and_then(|inning| resolve_team_label(&inning, teams))
         .or_else(|| teams.iter().find(|team| team.as_str() != batting_team).cloned())
         .unwrap_or_else(|| "TBD".to_string())
 }

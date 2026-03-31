@@ -11,7 +11,9 @@ This repository now includes:
 - local API-key storage inside the app
 - live current-match fetching through the Tauri backend
 - IPL-first filtering when multiple live matches are returned
-- demo fallback when no API key is set or the live request fails
+- team names sourced from `teamInfo`
+- refresh preservation for the currently viewed match
+- IST-based refresh windows for IPL hours
 
 ## Live data source
 
@@ -38,14 +40,21 @@ After changing dependencies, run:
 2. `cargo fetch` if you want to pre-download Rust crates
 3. `npm.cmd run dev`
 
+## How refresh works
+
+The app only fetches scores during these IST windows:
+
+- Monday to Friday: 7:00 PM to 12:30 AM
+- Saturday and Sunday: 3:00 PM to 12:30 AM
+
+Outside those windows, auto-refresh is paused and the overlay keeps showing the currently displayed match card.
+
 ## How to use live mode
 
 1. Launch the app
 2. Click the `API` button in the overlay
 3. Paste your CricAPI key
 4. Click `Save`
-
-The app refreshes live scores every 20 seconds and prefers current IPL matches when they are available.
 
 ## Planned follow-up
 

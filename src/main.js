@@ -3,6 +3,10 @@ import { fetchLiveMatches, IPL_KEYWORDS } from "./live-score.js";
 
 const STORAGE_KEY = "scorecard-overlay:cricapi-key";
 const REFRESH_INTERVAL_MS = 20_000;
+const IST_TIME_ZONE = "Asia/Kolkata";
+const WEEKDAY_START_MINUTES = 19 * 60;
+const WEEKEND_START_MINUTES = 15 * 60;
+const END_MINUTES = 24 * 60 + 30;
 
 const elements = {
   matchTitle: document.querySelector("#match-title"),
@@ -34,6 +38,14 @@ const state = {
   lastError: ""
 };
 
+const istFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: IST_TIME_ZONE,
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false
+});
+
 function createDemoOverlayMatch(match) {
   const state = match.timeline[0];
 
@@ -56,7 +68,7 @@ function createDemoOverlayMatch(match) {
 }
 
 function getDisplayedMatches() {
-  if (state.mode === "live" && state.liveMatches.length > 0) {
+  if (state.mode === "api" && state.liveMatches.length > 0) {
     return state.liveMatches;
   }
 
@@ -89,6 +101,54 @@ function formatError(error) {
   return "Unknown error while contacting the live score service.";
 }
 
+function getIstParts(date = new Date()) {
+  const parts = istFormatter.formatToParts(date);
+  const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+
+  return {
+    weekday: values.weekday,
+    hour: Number(values.hour),
+    minute: Number(values.minute)
+  };
+}
+
+function isWeekendWeekday(weekday) {
+  return weekday === "Sat" || weekday === "Sun";
+}
+
+function getRefreshWindowStatus(date = new Date()) {
+  const { weekday, hour, minute } = getIstParts(date);
+  const minutes = hour * 60 + minute;
+
+  if (minutes < 30) {
+    const previousDay = weekday === "Sun" ? "Sat" : weekday === "Mon" ? "Sun" : weekday === "Tue" ? "Mon" : weekday === "Wed" ? "Tue" : weekday === "Thu" ? "Wed" : weekday === "Fri" ? "Thu" : "Fri";
+    const previousStart = isWeekendWeekday(previousDay) ? WEEKEND_START_MINUTES : WEEKDAY_START_MINUTES;
+
+    return {
+      active: END_MINUTES > 24 * 60,
+      label: previousDay,
+      startMinutes: previousStart,
+      currentMinutes: minutes + 24 * 60
+    };
+  }
+
+  const startMinutes = isWeekendWeekday(weekday) ? WEEKEND_START_MINUTES : WEEKDAY_START_MINUTES;
+  return {
+    active: minutes >= startMinutes && minutes <= END_MINUTES,
+    label: weekday,
+    startMinutes,
+    currentMinutes: minutes
+  };
+}
+
+function isWithinRefreshWindow(date = new Date()) {
+  return getRefreshWindowStatus(date).active;
+}
+
+function getRefreshWindowMessage() {
+  return "Auto-refresh runs only during IPL windows: Mon-Fri 7:00 PM-12:30 AM IST and Sat-Sun 3:00 PM-12:30 AM IST.";
+}
+
 function renderMatch(match) {
   elements.matchTitle.textContent = match.matchTitle || "Match unavailable";
   elements.battingTeam.textContent = match.battingTeam || "-";
@@ -105,7 +165,7 @@ function renderMatch(match) {
 
 function renderEmptyState(message) {
   renderMatch({
-    matchTitle: "No live matches found",
+    matchTitle: "No IPL matches found",
     battingTeam: "-",
     battingScore: "-",
     battingOvers: "Waiting for play",
@@ -119,25 +179,61 @@ function renderEmptyState(message) {
   });
 }
 
+function getApiModeSummary(matches) {
+  const liveCount = matches.filter((match) => match.isLive).length;
+  const iplCount = matches.filter(isIplMatch).length;
+
+  if (liveCount > 0 && iplCount > 0) {
+    return {
+      label: iplCount === 1 ? "LIVE IPL SOURCE" : `LIVE IPL SOURCE • ${iplCount} MATCHES`,
+      pill: "LIVE",
+      help: "Showing current IPL matches from the API."
+    };
+  }
+
+  if (iplCount > 0) {
+    return {
+      label: iplCount === 1 ? "IPL RESULTS SOURCE" : `IPL RESULTS SOURCE • ${iplCount} MATCHES`,
+      pill: "IPL",
+      help: "No IPL match is live right now, so the overlay is showing IPL matches returned by the API."
+    };
+  }
+
+  if (liveCount > 0) {
+    return {
+      label: liveCount === 1 ? "LIVE CRICKET SOURCE" : `LIVE CRICKET SOURCE • ${liveCount} MATCHES`,
+      pill: "LIVE",
+      help: "No IPL match was returned, so the overlay is showing other live cricket matches from the API."
+    };
+  }
+
+  return {
+    label: "API SOURCE",
+    pill: "API",
+    help: "The API returned matches, but none matched the current display preference."
+  };
+}
+
 function updateHeader() {
-  const liveCount = state.liveMatches.length;
-  const isLiveMode = state.mode === "live" && liveCount > 0;
+  const apiMode = state.mode === "api" && state.liveMatches.length > 0;
+  const summary = apiMode
+    ? getApiModeSummary(state.liveMatches)
+    : {
+        label: "DEMO OVERLAY",
+        pill: "DEMO",
+        help: "Paste a CricAPI key to switch from demo scores to live current matches. The key is stored only on this computer."
+      };
 
-  elements.dataSource.textContent = isLiveMode
-    ? liveCount === 1
-      ? "LIVE IPL SOURCE"
-      : `LIVE IPL SOURCE • ${liveCount} MATCHES`
-    : "DEMO OVERLAY";
-
-  elements.livePill.textContent = isLiveMode ? "LIVE" : "DEMO";
-  elements.livePill.classList.toggle("live-pill--demo", !isLiveMode);
+  elements.dataSource.textContent = summary.label;
+  elements.livePill.textContent = summary.pill;
+  elements.livePill.classList.toggle("live-pill--demo", summary.pill === "DEMO");
 
   if (state.lastError) {
-    elements.settingsHelp.textContent = state.lastError;
-  } else if (state.apiKey) {
-    elements.settingsHelp.textContent = "Live fetch is enabled. The overlay prefers IPL matches and refreshes automatically every 20 seconds.";
+    elements.settingsHelp.textContent = `${state.lastError} ${getRefreshWindowMessage()}`;
+  } else if (!isWithinRefreshWindow() && state.apiKey) {
+    elements.settingsHelp.textContent = getRefreshWindowMessage();
   } else {
-    elements.settingsHelp.textContent = "Paste a CricAPI key to switch from demo scores to live current matches. The key is stored only on this computer.";
+    elements.settingsHelp.textContent = summary.help;
   }
 }
 
@@ -145,43 +241,62 @@ function renderCurrentMatch() {
   const matches = getDisplayedMatches();
 
   if (matches.length === 0) {
-    renderEmptyState("No current matches were returned by the API.");
+    renderEmptyState("No IPL matches were returned by the API.");
     return;
   }
 
   state.activeMatchIndex = state.activeMatchIndex % matches.length;
   renderMatch(matches[state.activeMatchIndex]);
-  elements.cycleButton.textContent = matches.length > 1 ? "Next Match" : "Refresh";
+  elements.cycleButton.textContent = matches.length > 1 ? "Next Match" : isWithinRefreshWindow() ? "Refresh" : "Refresh Paused";
+}
+
+function isIplMatch(match) {
+  const haystack = `${match.matchTitle} ${match.competition}`.toLowerCase();
+  return IPL_KEYWORDS.some((keyword) => haystack.includes(keyword));
+}
+
+function prioritizeMatches(matches) {
+  const iplMatches = matches.filter(isIplMatch);
+  const liveIplMatches = iplMatches.filter((match) => match.isLive);
+  const liveOtherMatches = matches.filter((match) => match.isLive && !isIplMatch(match));
+
+  if (liveIplMatches.length > 0) {
+    return liveIplMatches;
+  }
+
+  if (iplMatches.length > 0) {
+    return iplMatches;
+  }
+
+  if (liveOtherMatches.length > 0) {
+    return liveOtherMatches;
+  }
+
+  return matches;
 }
 
 function applyLiveMatches(matches) {
   const prioritized = prioritizeMatches(matches);
+  const currentMatchId = getDisplayedMatches()[state.activeMatchIndex]?.id;
 
   if (prioritized.length > 0) {
     state.liveMatches = prioritized;
-    state.mode = "live";
-    state.activeMatchIndex = 0;
+    state.mode = "api";
     state.lastError = "";
+
+    if (currentMatchId) {
+      const preservedIndex = prioritized.findIndex((match) => match.id === currentMatchId);
+      state.activeMatchIndex = preservedIndex >= 0 ? preservedIndex : 0;
+    } else {
+      state.activeMatchIndex = 0;
+    }
+
     return;
   }
 
   state.liveMatches = [];
   state.mode = "demo";
-  state.lastError = "No live IPL match was found, so the overlay is showing demo data.";
-}
-
-function prioritizeMatches(matches) {
-  const liveOnly = matches.filter((match) => match.isLive);
-  const ipls = liveOnly.filter((match) => {
-    const haystack = `${match.matchTitle} ${match.competition}`.toLowerCase();
-    return IPL_KEYWORDS.some((keyword) => haystack.includes(keyword));
-  });
-
-  if (ipls.length > 0) {
-    return ipls;
-  }
-
-  return liveOnly;
+  state.lastError = "No IPL or live cricket matches were found, so the overlay is showing demo data.";
 }
 
 async function refreshScores() {
@@ -189,6 +304,13 @@ async function refreshScores() {
     state.mode = "demo";
     state.liveMatches = [];
     state.lastError = "";
+    updateHeader();
+    renderCurrentMatch();
+    return;
+  }
+
+  if (!isWithinRefreshWindow()) {
+    state.lastError = "Auto-refresh is paused outside IPL match hours.";
     updateHeader();
     renderCurrentMatch();
     return;
@@ -211,7 +333,13 @@ function cycleMatch() {
   const matches = getDisplayedMatches();
 
   if (matches.length <= 1) {
-    refreshScores();
+    if (isWithinRefreshWindow()) {
+      refreshScores();
+    } else {
+      state.lastError = "Manual refresh is paused outside IPL match hours.";
+      updateHeader();
+      renderCurrentMatch();
+    }
     return;
   }
 
