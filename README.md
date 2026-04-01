@@ -42,12 +42,12 @@ After changing dependencies, run:
 
 ## How refresh works
 
-The app only fetches scores during these IST windows:
+The app only auto-refreshes scores during these IST windows:
 
 - Monday to Friday: 7:00 PM to 12:30 AM
 - Saturday and Sunday: 3:00 PM to 12:30 AM
 
-Outside those windows, auto-refresh is paused and the overlay keeps showing the currently displayed match card.
+Outside those windows, automatic polling is paused. The app can still load API data on startup or when you save the API key, so past IPL matches can still be displayed.
 
 ## How to use live mode
 

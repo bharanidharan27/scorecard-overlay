@@ -2,6 +2,7 @@ import { demoMatches } from "./mock-score.js";
 import { fetchLiveMatches, IPL_KEYWORDS } from "./live-score.js";
 
 const STORAGE_KEY = "scorecard-overlay:cricapi-key";
+const MATCH_CACHE_KEY = "scorecard-overlay:cached-matches";
 const REFRESH_INTERVAL_MS = 20_000;
 const IST_TIME_ZONE = "Asia/Kolkata";
 const WEEKDAY_START_MINUTES = 19 * 60;
@@ -46,25 +47,56 @@ const istFormatter = new Intl.DateTimeFormat("en-US", {
   hour12: false
 });
 
+function validateElements() {
+  return Object.values(elements).every(Boolean);
+}
+
 function createDemoOverlayMatch(match) {
-  const state = match.timeline[0];
+  const firstState = match.timeline[0];
 
   return {
     id: `${match.home.short}-${match.away.short}`,
     competition: "Demo IPL",
-    current: state.current,
+    current: firstState.current,
     isLive: true,
-    lastOver: state.lastOver,
+    lastOver: firstState.lastOver,
     matchTitle: `${match.home.short} vs ${match.away.short}`,
-    runRate: state.runRate,
-    status: state.status,
-    battingOvers: `${state.batting.overs} overs`,
-    battingScore: `${state.batting.score}/${state.batting.wickets}`,
-    battingTeam: state.batting.short,
-    bowlingMeta: state.chase,
-    bowlingNote: state.bowling.note,
-    bowlingTeam: state.bowling.short
+    runRate: firstState.runRate,
+    status: firstState.status,
+    battingOvers: `${firstState.batting.overs} overs`,
+    battingScore: `${firstState.batting.score}/${firstState.batting.wickets}`,
+    battingTeam: firstState.batting.short,
+    bowlingMeta: firstState.chase,
+    bowlingNote: firstState.bowling.note,
+    bowlingTeam: firstState.bowling.short
   };
+}
+
+function restoreCachedMatches() {
+  try {
+    const raw = window.localStorage.getItem(MATCH_CACHE_KEY);
+    if (!raw) {
+      return;
+    }
+
+    const cached = JSON.parse(raw);
+    if (Array.isArray(cached) && cached.length > 0) {
+      state.liveMatches = cached;
+      state.mode = "api";
+    }
+  } catch {
+    window.localStorage.removeItem(MATCH_CACHE_KEY);
+  }
+}
+
+function cacheMatches(matches) {
+  if (matches.length > 0) {
+    window.localStorage.setItem(MATCH_CACHE_KEY, JSON.stringify(matches));
+  }
+}
+
+function clearCachedMatches() {
+  window.localStorage.removeItem(MATCH_CACHE_KEY);
 }
 
 function getDisplayedMatches() {
@@ -102,8 +134,12 @@ function formatError(error) {
 }
 
 function getIstParts(date = new Date()) {
-  const parts = istFormatter.formatToParts(date);
-  const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  const values = Object.fromEntries(
+    istFormatter
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value])
+  );
 
   return {
     weekday: values.weekday,
@@ -116,33 +152,35 @@ function isWeekendWeekday(weekday) {
   return weekday === "Sat" || weekday === "Sun";
 }
 
-function getRefreshWindowStatus(date = new Date()) {
+function getPreviousWeekday(weekday) {
+  return weekday === "Sun"
+    ? "Sat"
+    : weekday === "Mon"
+      ? "Sun"
+      : weekday === "Tue"
+        ? "Mon"
+        : weekday === "Wed"
+          ? "Tue"
+          : weekday === "Thu"
+            ? "Wed"
+            : weekday === "Fri"
+              ? "Thu"
+              : "Fri";
+}
+
+function isWithinRefreshWindow(date = new Date()) {
   const { weekday, hour, minute } = getIstParts(date);
   const minutes = hour * 60 + minute;
 
   if (minutes < 30) {
-    const previousDay = weekday === "Sun" ? "Sat" : weekday === "Mon" ? "Sun" : weekday === "Tue" ? "Mon" : weekday === "Wed" ? "Tue" : weekday === "Thu" ? "Wed" : weekday === "Fri" ? "Thu" : "Fri";
+    const previousDay = getPreviousWeekday(weekday);
     const previousStart = isWeekendWeekday(previousDay) ? WEEKEND_START_MINUTES : WEEKDAY_START_MINUTES;
-
-    return {
-      active: END_MINUTES > 24 * 60,
-      label: previousDay,
-      startMinutes: previousStart,
-      currentMinutes: minutes + 24 * 60
-    };
+    const carriedMinutes = minutes + 24 * 60;
+    return carriedMinutes >= previousStart && carriedMinutes <= END_MINUTES;
   }
 
   const startMinutes = isWeekendWeekday(weekday) ? WEEKEND_START_MINUTES : WEEKDAY_START_MINUTES;
-  return {
-    active: minutes >= startMinutes && minutes <= END_MINUTES,
-    label: weekday,
-    startMinutes,
-    currentMinutes: minutes
-  };
-}
-
-function isWithinRefreshWindow(date = new Date()) {
-  return getRefreshWindowStatus(date).active;
+  return minutes >= startMinutes && minutes <= END_MINUTES;
 }
 
 function getRefreshWindowMessage() {
@@ -177,6 +215,11 @@ function renderEmptyState(message) {
     lastOver: "-",
     status: message
   });
+}
+
+function isIplMatch(match) {
+  const haystack = `${match.matchTitle} ${match.competition}`.toLowerCase();
+  return IPL_KEYWORDS.some((keyword) => haystack.includes(keyword));
 }
 
 function getApiModeSummary(matches) {
@@ -231,7 +274,7 @@ function updateHeader() {
   if (state.lastError) {
     elements.settingsHelp.textContent = `${state.lastError} ${getRefreshWindowMessage()}`;
   } else if (!isWithinRefreshWindow() && state.apiKey) {
-    elements.settingsHelp.textContent = getRefreshWindowMessage();
+    elements.settingsHelp.textContent = `${summary.help} ${getRefreshWindowMessage()}`;
   } else {
     elements.settingsHelp.textContent = summary.help;
   }
@@ -248,11 +291,6 @@ function renderCurrentMatch() {
   state.activeMatchIndex = state.activeMatchIndex % matches.length;
   renderMatch(matches[state.activeMatchIndex]);
   elements.cycleButton.textContent = matches.length > 1 ? "Next Match" : isWithinRefreshWindow() ? "Refresh" : "Refresh Paused";
-}
-
-function isIplMatch(match) {
-  const haystack = `${match.matchTitle} ${match.competition}`.toLowerCase();
-  return IPL_KEYWORDS.some((keyword) => haystack.includes(keyword));
 }
 
 function prioritizeMatches(matches) {
@@ -283,6 +321,7 @@ function applyLiveMatches(matches) {
     state.liveMatches = prioritized;
     state.mode = "api";
     state.lastError = "";
+    cacheMatches(prioritized);
 
     if (currentMatchId) {
       const preservedIndex = prioritized.findIndex((match) => match.id === currentMatchId);
@@ -294,13 +333,17 @@ function applyLiveMatches(matches) {
     return;
   }
 
+  clearCachedMatches();
   state.liveMatches = [];
   state.mode = "demo";
   state.lastError = "No IPL or live cricket matches were found, so the overlay is showing demo data.";
 }
 
-async function refreshScores() {
+async function refreshScores(options = {}) {
+  const { allowOutsideWindow = false, reason = "auto" } = options;
+
   if (!state.apiKey) {
+    clearCachedMatches();
     state.mode = "demo";
     state.liveMatches = [];
     state.lastError = "";
@@ -309,8 +352,10 @@ async function refreshScores() {
     return;
   }
 
-  if (!isWithinRefreshWindow()) {
-    state.lastError = "Auto-refresh is paused outside IPL match hours.";
+  if (!allowOutsideWindow && !isWithinRefreshWindow()) {
+    state.lastError = reason === "manual"
+      ? "Manual refresh is paused outside IPL match hours."
+      : "Auto-refresh is paused outside IPL match hours.";
     updateHeader();
     renderCurrentMatch();
     return;
@@ -320,8 +365,9 @@ async function refreshScores() {
     const matches = await fetchLiveMatches(state.apiKey);
     applyLiveMatches(matches);
   } catch (error) {
-    state.mode = "demo";
-    state.liveMatches = [];
+    if (state.liveMatches.length === 0) {
+      restoreCachedMatches();
+    }
     state.lastError = `Live fetch failed: ${formatError(error)}`;
   }
 
@@ -334,7 +380,7 @@ function cycleMatch() {
 
   if (matches.length <= 1) {
     if (isWithinRefreshWindow()) {
-      refreshScores();
+      refreshScores({ reason: "manual" });
     } else {
       state.lastError = "Manual refresh is paused outside IPL match hours.";
       updateHeader();
@@ -364,13 +410,20 @@ function saveApiKey() {
     window.localStorage.setItem(STORAGE_KEY, state.apiKey);
   } else {
     window.localStorage.removeItem(STORAGE_KEY);
+    clearCachedMatches();
   }
 
   state.activeMatchIndex = 0;
-  refreshScores();
+  refreshScores({ allowOutsideWindow: true, reason: "setup" });
 }
 
 function init() {
+  if (!validateElements()) {
+    console.error("Overlay UI failed to initialize because one or more required DOM elements were not found.", elements);
+    return;
+  }
+
+  restoreCachedMatches();
   elements.apiKeyInput.value = state.apiKey;
   elements.cycleButton.addEventListener("click", cycleMatch);
   elements.toggleSettings.addEventListener("click", toggleSettingsPanel);
@@ -383,8 +436,10 @@ function init() {
 
   updateHeader();
   renderCurrentMatch();
-  refreshScores();
-  window.setInterval(refreshScores, REFRESH_INTERVAL_MS);
+  refreshScores({ allowOutsideWindow: true, reason: "startup" });
+  window.setInterval(() => {
+    refreshScores({ reason: "auto" });
+  }, REFRESH_INTERVAL_MS);
 }
 
 init();

@@ -108,6 +108,15 @@ fn normalize_match(raw: &Value) -> OverlayMatch {
         None
     };
 
+    let is_live = raw
+        .get("matchStarted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && !raw
+            .get("matchEnded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
     let batting_team = batting_entry
         .and_then(|entry| entry.get("inning"))
         .and_then(Value::as_str)
@@ -124,18 +133,20 @@ fn normalize_match(raw: &Value) -> OverlayMatch {
         .map(stringify_value)
         .filter(|value| !value.is_empty())
         .map(|overs| format!("{overs} overs"))
-        .unwrap_or_else(|| "Overs unavailable".to_string());
+        .unwrap_or_else(|| if is_live { "Overs unavailable".to_string() } else { "Completed innings".to_string() });
 
     let bowling_team = resolve_bowling_team(other_entry, &teams, &batting_team);
     let bowling_note = other_entry
         .map(format_score)
         .filter(|value| value != "-")
-        .unwrap_or_else(|| "Yet to bat".to_string());
+        .unwrap_or_else(|| if is_live { "Yet to bat".to_string() } else { "Score unavailable".to_string() });
 
     let bowling_meta = if scores.len() >= 2 {
         "Previous innings".to_string()
-    } else {
+    } else if is_live {
         status.clone()
+    } else {
+        "Completed match".to_string()
     };
 
     let current = raw
@@ -143,28 +154,19 @@ fn normalize_match(raw: &Value) -> OverlayMatch {
         .and_then(Value::as_str)
         .filter(|venue| !venue.is_empty())
         .map(|venue| format!("Venue: {venue}"))
-        .unwrap_or_else(|| get_string(raw, &["matchType"]));
+        .unwrap_or_else(|| if is_live { get_string(raw, &["matchType"]) } else { "Completed match".to_string() });
 
     let run_rate = batting_entry
         .and_then(|entry| entry.get("runRate"))
         .map(stringify_value)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Live".to_string());
+        .unwrap_or_else(|| if is_live { "Live".to_string() } else { "Completed".to_string() });
 
     let last_over = batting_entry
         .and_then(|entry| entry.get("lastOver"))
         .map(stringify_value)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Not provided".to_string());
-
-    let is_live = raw
-        .get("matchStarted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        && !raw
-            .get("matchEnded")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        .unwrap_or_else(|| if is_live { "Not provided".to_string() } else { "Completed".to_string() });
 
     OverlayMatch {
         competition,
