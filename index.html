@@ -2,76 +2,66 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0"
-    />
-    <title>Scorecard Overlay</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NBA Overlay</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <main class="overlay-shell">
       <section class="scoreboard">
-        <header class="scoreboard__header" data-tauri-drag-region>
+        <header class="scoreboard__header">
           <div>
-            <p id="data-source" class="eyebrow">LIVE IPL OVERLAY</p>
+            <p id="data-source" class="eyebrow">NBA LIVE FEED</p>
             <h1 id="match-title">Match Loading</h1>
           </div>
-          <div class="header-actions" data-tauri-drag-region="false">
-            <span id="live-pill" class="live-pill">LIVE</span>
-            <button id="toggle-settings" class="ghost-button" type="button">API</button>
-          </div>
+          <span id="live-pill" class="live-pill">PUSH</span>
         </header>
 
-        <section id="settings-panel" class="settings-panel is-hidden">
-          <label class="settings-panel__label" for="api-key">CricAPI key</label>
-          <div class="settings-panel__row">
-            <input id="api-key" type="password" placeholder="Paste your API key" autocomplete="off" />
-            <button id="save-api-key" type="button">Save</button>
-          </div>
-          <p id="settings-help" class="settings-panel__help">
-            The key is stored only on this computer. Live mode prefers current IPL matches and falls back to demo data when unavailable.
-          </p>
-        </section>
-
-        <div class="teams">
-          <article class="team-card team-card--batting">
-            <p class="team-card__label">Batting</p>
-            <div class="team-card__row">
-              <h2 id="batting-team">-</h2>
-              <p id="batting-score" class="team-card__score">0/0</p>
-            </div>
-            <p id="batting-overs" class="team-card__meta">0.0 overs</p>
-          </article>
-
+        <section class="teams">
           <article class="team-card">
-            <p class="team-card__label">Other Innings</p>
-            <div class="team-card__row">
-              <h2 id="bowling-team">-</h2>
-              <p id="bowling-score" class="team-card__score">Yet to bat</p>
+            <div class="team-card__row team-card__row--top">
+              <div>
+                <p id="away-code" class="team-card__code">AWY</p>
+                <h2 id="away-name">Away Team</h2>
+              </div>
+              <p id="away-score" class="team-card__score">0</p>
             </div>
-            <p id="bowling-overs" class="team-card__meta">Target pending</p>
+            <p id="away-meta" class="team-card__meta">0-0</p>
           </article>
-        </div>
+
+          <article class="team-card team-card--home">
+            <div class="team-card__row team-card__row--top">
+              <div>
+                <p id="home-code" class="team-card__code">HME</p>
+                <h2 id="home-name">Home Team</h2>
+              </div>
+              <p id="home-score" class="team-card__score">0</p>
+            </div>
+            <p id="home-meta" class="team-card__meta">0-0</p>
+          </article>
+        </section>
 
         <section class="match-strip">
           <div>
-            <p class="match-strip__label">Match Info</p>
-            <p id="current-batters" class="match-strip__value">-</p>
+            <p class="match-strip__label">Arena</p>
+            <p id="arena" class="match-strip__value">Arena unavailable</p>
           </div>
           <div>
-            <p class="match-strip__label">Run Rate</p>
-            <p id="run-rate" class="match-strip__value">-</p>
+            <p class="match-strip__label">Tip-off</p>
+            <p id="tipoff" class="match-strip__value">Tip-off TBD</p>
           </div>
           <div>
-            <p class="match-strip__label">Last Over</p>
-            <p id="last-over" class="match-strip__value">-</p>
+            <p class="match-strip__label">Status</p>
+            <p id="game-phase" class="match-strip__value">NBA</p>
           </div>
         </section>
 
         <footer class="scoreboard__footer">
-          <p id="match-status">Waiting for score updates...</p>
-          <button id="cycle-match" type="button">Next Match</button>
+          <div>
+            <p id="game-status" class="status-line">Waiting for backend updates...</p>
+            <p id="game-clock" class="clock-line">--:--</p>
+          </div>
+          <button id="cycle-match" type="button">Next Game</button>
         </footer>
       </section>
     </main>

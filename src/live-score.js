@@ -1,31 +1,52 @@
 import { invoke } from "../node_modules/@tauri-apps/api/core.js";
+import { listen } from "../node_modules/@tauri-apps/api/event.js";
 
-export const IPL_KEYWORDS = ["ipl", "indian premier league"];
+const SCORE_EVENT = "nba-scoreboard:update";
 
-function normalizeField(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
+function normalizeText(value, fallback = "") {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
-function normalizeMatch(raw) {
+function normalizeTeam(raw) {
   return {
-    id: normalizeField(raw.id) || crypto.randomUUID(),
-    competition: normalizeField(raw.competition),
-    current: normalizeField(raw.current),
-    isLive: Boolean(raw.is_live),
-    lastOver: normalizeField(raw.last_over),
-    matchTitle: normalizeField(raw.match_title),
-    runRate: normalizeField(raw.run_rate),
-    status: normalizeField(raw.status),
-    battingOvers: normalizeField(raw.batting_overs),
-    battingScore: normalizeField(raw.batting_score),
-    battingTeam: normalizeField(raw.batting_team),
-    bowlingMeta: normalizeField(raw.bowling_meta),
-    bowlingNote: normalizeField(raw.bowling_note),
-    bowlingTeam: normalizeField(raw.bowling_team)
+    code: normalizeText(raw?.code, "TBD"),
+    name: normalizeText(raw?.name),
+    score: normalizeText(raw?.score, "0"),
+    record: normalizeText(raw?.record)
   };
 }
 
-export async function fetchLiveMatches(apiKey) {
-  const matches = await invoke("fetch_current_matches", { apiKey });
-  return Array.isArray(matches) ? matches.map(normalizeMatch) : [];
+function normalizeGame(raw) {
+  return {
+    id: normalizeText(raw?.id) || crypto.randomUUID(),
+    status: normalizeText(raw?.status),
+    statusText: normalizeText(raw?.status_text),
+    period: normalizeText(raw?.period),
+    clock: normalizeText(raw?.clock),
+    arena: normalizeText(raw?.arena),
+    startTime: normalizeText(raw?.start_time),
+    headline: normalizeText(raw?.headline),
+    seriesText: normalizeText(raw?.series_text),
+    awayTeam: normalizeTeam(raw?.away_team),
+    homeTeam: normalizeTeam(raw?.home_team)
+  };
+}
+
+function normalizeSnapshot(raw) {
+  return {
+    source: normalizeText(raw?.source, "nba-live"),
+    updatedAt: normalizeText(raw?.updated_at, "NBA scoreboard updated"),
+    games: Array.isArray(raw?.games) ? raw.games.map(normalizeGame) : []
+  };
+}
+
+export async function getInitialSnapshot() {
+  const snapshot = await invoke("get_scoreboard_snapshot");
+  return normalizeSnapshot(snapshot);
+}
+
+export async function subscribeToScoreboard(handler) {
+  return listen(SCORE_EVENT, (event) => {
+    handler(normalizeSnapshot(event.payload));
+  });
 }

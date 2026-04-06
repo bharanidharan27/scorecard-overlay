@@ -1,445 +1,128 @@
-import { demoMatches } from "./mock-score.js";
-import { fetchLiveMatches, IPL_KEYWORDS } from "./live-score.js";
-
-const STORAGE_KEY = "scorecard-overlay:cricapi-key";
-const MATCH_CACHE_KEY = "scorecard-overlay:cached-matches";
-const REFRESH_INTERVAL_MS = 20_000;
-const IST_TIME_ZONE = "Asia/Kolkata";
-const WEEKDAY_START_MINUTES = 19 * 60;
-const WEEKEND_START_MINUTES = 15 * 60;
-const END_MINUTES = 24 * 60 + 30;
+import { getInitialSnapshot, subscribeToScoreboard } from "./live-score.js";
+import { demoGames } from "./mock-score.js";
 
 const elements = {
   matchTitle: document.querySelector("#match-title"),
-  battingTeam: document.querySelector("#batting-team"),
-  battingScore: document.querySelector("#batting-score"),
-  battingOvers: document.querySelector("#batting-overs"),
-  bowlingTeam: document.querySelector("#bowling-team"),
-  bowlingScore: document.querySelector("#bowling-score"),
-  bowlingOvers: document.querySelector("#bowling-overs"),
-  currentBatters: document.querySelector("#current-batters"),
-  runRate: document.querySelector("#run-rate"),
-  lastOver: document.querySelector("#last-over"),
-  matchStatus: document.querySelector("#match-status"),
-  cycleButton: document.querySelector("#cycle-match"),
-  dataSource: document.querySelector("#data-source"),
-  livePill: document.querySelector("#live-pill"),
-  toggleSettings: document.querySelector("#toggle-settings"),
-  settingsPanel: document.querySelector("#settings-panel"),
-  apiKeyInput: document.querySelector("#api-key"),
-  saveApiKey: document.querySelector("#save-api-key"),
-  settingsHelp: document.querySelector("#settings-help")
+  awayCode: document.querySelector("#away-code"),
+  awayName: document.querySelector("#away-name"),
+  awayScore: document.querySelector("#away-score"),
+  awayMeta: document.querySelector("#away-meta"),
+  homeCode: document.querySelector("#home-code"),
+  homeName: document.querySelector("#home-name"),
+  homeScore: document.querySelector("#home-score"),
+  homeMeta: document.querySelector("#home-meta"),
+  arena: document.querySelector("#arena"),
+  tipoff: document.querySelector("#tipoff"),
+  gamePhase: document.querySelector("#game-phase"),
+  gameClock: document.querySelector("#game-clock"),
+  gameStatus: document.querySelector("#game-status"),
+  nextGameButton: document.querySelector("#cycle-match"),
+  source: document.querySelector("#data-source"),
+  livePill: document.querySelector("#live-pill")
 };
 
 const state = {
-  activeMatchIndex: 0,
-  apiKey: window.localStorage.getItem(STORAGE_KEY) || "",
-  liveMatches: [],
-  mode: "demo",
-  lastError: ""
+  activeGameIndex: 0,
+  games: demoGames,
+  source: "demo",
+  updatedAt: "Using local demo NBA scoreboard"
 };
-
-const istFormatter = new Intl.DateTimeFormat("en-US", {
-  timeZone: IST_TIME_ZONE,
-  weekday: "short",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false
-});
 
 function validateElements() {
   return Object.values(elements).every(Boolean);
 }
 
-function createDemoOverlayMatch(match) {
-  const firstState = match.timeline[0];
-
-  return {
-    id: `${match.home.short}-${match.away.short}`,
-    competition: "Demo IPL",
-    current: firstState.current,
-    isLive: true,
-    lastOver: firstState.lastOver,
-    matchTitle: `${match.home.short} vs ${match.away.short}`,
-    runRate: firstState.runRate,
-    status: firstState.status,
-    battingOvers: `${firstState.batting.overs} overs`,
-    battingScore: `${firstState.batting.score}/${firstState.batting.wickets}`,
-    battingTeam: firstState.batting.short,
-    bowlingMeta: firstState.chase,
-    bowlingNote: firstState.bowling.note,
-    bowlingTeam: firstState.bowling.short
-  };
+function getDisplayedGames() {
+  return state.games.length > 0 ? state.games : demoGames;
 }
 
-function restoreCachedMatches() {
-  try {
-    const raw = window.localStorage.getItem(MATCH_CACHE_KEY);
-    if (!raw) {
-      return;
-    }
-
-    const cached = JSON.parse(raw);
-    if (Array.isArray(cached) && cached.length > 0) {
-      state.liveMatches = cached;
-      state.mode = "api";
-    }
-  } catch {
-    window.localStorage.removeItem(MATCH_CACHE_KEY);
-  }
-}
-
-function cacheMatches(matches) {
-  if (matches.length > 0) {
-    window.localStorage.setItem(MATCH_CACHE_KEY, JSON.stringify(matches));
-  }
-}
-
-function clearCachedMatches() {
-  window.localStorage.removeItem(MATCH_CACHE_KEY);
-}
-
-function getDisplayedMatches() {
-  if (state.mode === "api" && state.liveMatches.length > 0) {
-    return state.liveMatches;
-  }
-
-  return demoMatches.map(createDemoOverlayMatch);
-}
-
-function formatError(error) {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  if (typeof error === "string" && error.trim()) {
-    return error;
-  }
-
-  if (error && typeof error === "object") {
-    const candidates = [error.message, error.error, error.reason, error.details];
-    const text = candidates.find((value) => typeof value === "string" && value.trim());
-    if (text) {
-      return text;
-    }
-
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return String(error);
-    }
-  }
-
-  return "Unknown error while contacting the live score service.";
-}
-
-function getIstParts(date = new Date()) {
-  const values = Object.fromEntries(
-    istFormatter
-      .formatToParts(date)
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, part.value])
-  );
-
-  return {
-    weekday: values.weekday,
-    hour: Number(values.hour),
-    minute: Number(values.minute)
-  };
-}
-
-function isWeekendWeekday(weekday) {
-  return weekday === "Sat" || weekday === "Sun";
-}
-
-function getPreviousWeekday(weekday) {
-  return weekday === "Sun"
-    ? "Sat"
-    : weekday === "Mon"
-      ? "Sun"
-      : weekday === "Tue"
-        ? "Mon"
-        : weekday === "Wed"
-          ? "Tue"
-          : weekday === "Thu"
-            ? "Wed"
-            : weekday === "Fri"
-              ? "Thu"
-              : "Fri";
-}
-
-function isWithinRefreshWindow(date = new Date()) {
-  const { weekday, hour, minute } = getIstParts(date);
-  const minutes = hour * 60 + minute;
-
-  if (minutes < 30) {
-    const previousDay = getPreviousWeekday(weekday);
-    const previousStart = isWeekendWeekday(previousDay) ? WEEKEND_START_MINUTES : WEEKDAY_START_MINUTES;
-    const carriedMinutes = minutes + 24 * 60;
-    return carriedMinutes >= previousStart && carriedMinutes <= END_MINUTES;
-  }
-
-  const startMinutes = isWeekendWeekday(weekday) ? WEEKEND_START_MINUTES : WEEKDAY_START_MINUTES;
-  return minutes >= startMinutes && minutes <= END_MINUTES;
-}
-
-function getRefreshWindowMessage() {
-  return "Auto-refresh runs only during IPL windows: Mon-Fri 7:00 PM-12:30 AM IST and Sat-Sun 3:00 PM-12:30 AM IST.";
-}
-
-function renderMatch(match) {
-  elements.matchTitle.textContent = match.matchTitle || "Match unavailable";
-  elements.battingTeam.textContent = match.battingTeam || "-";
-  elements.battingScore.textContent = match.battingScore || "-";
-  elements.battingOvers.textContent = match.battingOvers || "Overs unavailable";
-  elements.bowlingTeam.textContent = match.bowlingTeam || "-";
-  elements.bowlingScore.textContent = match.bowlingNote || "Yet to bat";
-  elements.bowlingOvers.textContent = match.bowlingMeta || "Target pending";
-  elements.currentBatters.textContent = match.current || "Live score";
-  elements.runRate.textContent = match.runRate || "-";
-  elements.lastOver.textContent = match.lastOver || "Not provided";
-  elements.matchStatus.textContent = match.status || "Waiting for updates";
-}
-
-function renderEmptyState(message) {
-  renderMatch({
-    matchTitle: "No IPL matches found",
-    battingTeam: "-",
-    battingScore: "-",
-    battingOvers: "Waiting for play",
-    bowlingTeam: "-",
-    bowlingNote: "-",
-    bowlingMeta: "-",
-    current: "Try again later",
-    runRate: "-",
-    lastOver: "-",
-    status: message
-  });
-}
-
-function isIplMatch(match) {
-  const haystack = `${match.matchTitle} ${match.competition}`.toLowerCase();
-  return IPL_KEYWORDS.some((keyword) => haystack.includes(keyword));
-}
-
-function getApiModeSummary(matches) {
-  const liveCount = matches.filter((match) => match.isLive).length;
-  const iplCount = matches.filter(isIplMatch).length;
-
-  if (liveCount > 0 && iplCount > 0) {
-    return {
-      label: iplCount === 1 ? "LIVE IPL SOURCE" : `LIVE IPL SOURCE • ${iplCount} MATCHES`,
-      pill: "LIVE",
-      help: "Showing current IPL matches from the API."
-    };
-  }
-
-  if (iplCount > 0) {
-    return {
-      label: iplCount === 1 ? "IPL RESULTS SOURCE" : `IPL RESULTS SOURCE • ${iplCount} MATCHES`,
-      pill: "IPL",
-      help: "No IPL match is live right now, so the overlay is showing IPL matches returned by the API."
-    };
-  }
-
-  if (liveCount > 0) {
-    return {
-      label: liveCount === 1 ? "LIVE CRICKET SOURCE" : `LIVE CRICKET SOURCE • ${liveCount} MATCHES`,
-      pill: "LIVE",
-      help: "No IPL match was returned, so the overlay is showing other live cricket matches from the API."
-    };
-  }
-
-  return {
-    label: "API SOURCE",
-    pill: "API",
-    help: "The API returned matches, but none matched the current display preference."
-  };
+function renderGame(game) {
+  elements.matchTitle.textContent = game.headline || `${game.awayTeam.code} at ${game.homeTeam.code}`;
+  elements.awayCode.textContent = game.awayTeam.code;
+  elements.awayName.textContent = game.awayTeam.name || "Away";
+  elements.awayScore.textContent = game.awayTeam.score || "0";
+  elements.awayMeta.textContent = game.awayTeam.record || "";
+  elements.homeCode.textContent = game.homeTeam.code;
+  elements.homeName.textContent = game.homeTeam.name || "Home";
+  elements.homeScore.textContent = game.homeTeam.score || "0";
+  elements.homeMeta.textContent = game.homeTeam.record || "";
+  elements.arena.textContent = game.arena || "Arena unavailable";
+  elements.tipoff.textContent = game.startTime || "Tip-off TBD";
+  elements.gamePhase.textContent = game.period || game.seriesText || "NBA";
+  elements.gameClock.textContent = game.clock || "--:--";
+  elements.gameStatus.textContent = game.statusText || state.updatedAt;
 }
 
 function updateHeader() {
-  const apiMode = state.mode === "api" && state.liveMatches.length > 0;
-  const summary = apiMode
-    ? getApiModeSummary(state.liveMatches)
-    : {
-        label: "DEMO OVERLAY",
-        pill: "DEMO",
-        help: "Paste a CricAPI key to switch from demo scores to live current matches. The key is stored only on this computer."
-      };
-
-  elements.dataSource.textContent = summary.label;
-  elements.livePill.textContent = summary.pill;
-  elements.livePill.classList.toggle("live-pill--demo", summary.pill === "DEMO");
-
-  if (state.lastError) {
-    elements.settingsHelp.textContent = `${state.lastError} ${getRefreshWindowMessage()}`;
-  } else if (!isWithinRefreshWindow() && state.apiKey) {
-    elements.settingsHelp.textContent = `${summary.help} ${getRefreshWindowMessage()}`;
-  } else {
-    elements.settingsHelp.textContent = summary.help;
-  }
+  const usingLive = state.source === "nba-live" && state.games.length > 0;
+  elements.source.textContent = usingLive ? `NBA LIVE FEED • ${state.games.length} GAMES` : "NBA DEMO FEED";
+  elements.livePill.textContent = usingLive ? "PUSH" : "DEMO";
+  elements.livePill.classList.toggle("live-pill--demo", !usingLive);
 }
 
-function renderCurrentMatch() {
-  const matches = getDisplayedMatches();
-
-  if (matches.length === 0) {
-    renderEmptyState("No IPL matches were returned by the API.");
-    return;
-  }
-
-  state.activeMatchIndex = state.activeMatchIndex % matches.length;
-  renderMatch(matches[state.activeMatchIndex]);
-  elements.cycleButton.textContent = matches.length > 1 ? "Next Match" : isWithinRefreshWindow() ? "Refresh" : "Refresh Paused";
+function renderCurrentGame() {
+  const games = getDisplayedGames();
+  state.activeGameIndex = state.activeGameIndex % games.length;
+  renderGame(games[state.activeGameIndex]);
+  elements.nextGameButton.textContent = games.length > 1 ? "Next Game" : "Refreshing";
 }
 
-function prioritizeMatches(matches) {
-  const iplMatches = matches.filter(isIplMatch);
-  const liveIplMatches = iplMatches.filter((match) => match.isLive);
-  const liveOtherMatches = matches.filter((match) => match.isLive && !isIplMatch(match));
+function applySnapshot(snapshot) {
+  if (snapshot.games.length > 0) {
+    const currentGameId = getDisplayedGames()[state.activeGameIndex]?.id;
+    state.games = snapshot.games;
+    state.source = snapshot.source;
+    state.updatedAt = snapshot.updatedAt;
 
-  if (liveIplMatches.length > 0) {
-    return liveIplMatches;
-  }
-
-  if (iplMatches.length > 0) {
-    return iplMatches;
-  }
-
-  if (liveOtherMatches.length > 0) {
-    return liveOtherMatches;
-  }
-
-  return matches;
-}
-
-function applyLiveMatches(matches) {
-  const prioritized = prioritizeMatches(matches);
-  const currentMatchId = getDisplayedMatches()[state.activeMatchIndex]?.id;
-
-  if (prioritized.length > 0) {
-    state.liveMatches = prioritized;
-    state.mode = "api";
-    state.lastError = "";
-    cacheMatches(prioritized);
-
-    if (currentMatchId) {
-      const preservedIndex = prioritized.findIndex((match) => match.id === currentMatchId);
-      state.activeMatchIndex = preservedIndex >= 0 ? preservedIndex : 0;
+    if (currentGameId) {
+      const preservedIndex = snapshot.games.findIndex((game) => game.id === currentGameId);
+      state.activeGameIndex = preservedIndex >= 0 ? preservedIndex : 0;
     } else {
-      state.activeMatchIndex = 0;
+      state.activeGameIndex = 0;
     }
-
-    return;
+  } else {
+    state.source = snapshot.source;
+    state.updatedAt = snapshot.updatedAt;
   }
 
-  clearCachedMatches();
-  state.liveMatches = [];
-  state.mode = "demo";
-  state.lastError = "No IPL or live cricket matches were found, so the overlay is showing demo data.";
+  updateHeader();
+  renderCurrentGame();
 }
 
-async function refreshScores(options = {}) {
-  const { allowOutsideWindow = false, reason = "auto" } = options;
-
-  if (!state.apiKey) {
-    clearCachedMatches();
-    state.mode = "demo";
-    state.liveMatches = [];
-    state.lastError = "";
-    updateHeader();
-    renderCurrentMatch();
+function cycleGame() {
+  const games = getDisplayedGames();
+  if (games.length <= 1) {
     return;
   }
 
-  if (!allowOutsideWindow && !isWithinRefreshWindow()) {
-    state.lastError = reason === "manual"
-      ? "Manual refresh is paused outside IPL match hours."
-      : "Auto-refresh is paused outside IPL match hours.";
-    updateHeader();
-    renderCurrentMatch();
+  state.activeGameIndex = (state.activeGameIndex + 1) % games.length;
+  renderCurrentGame();
+}
+
+async function init() {
+  if (!validateElements()) {
+    console.error("NBA overlay UI failed to initialize.", elements);
     return;
+  }
+
+  elements.nextGameButton.addEventListener("click", cycleGame);
+  updateHeader();
+  renderCurrentGame();
+
+  try {
+    const snapshot = await getInitialSnapshot();
+    applySnapshot(snapshot);
+  } catch (error) {
+    console.error("Failed to fetch initial NBA snapshot", error);
   }
 
   try {
-    const matches = await fetchLiveMatches(state.apiKey);
-    applyLiveMatches(matches);
+    await subscribeToScoreboard((snapshot) => {
+      applySnapshot(snapshot);
+    });
   } catch (error) {
-    if (state.liveMatches.length === 0) {
-      restoreCachedMatches();
-    }
-    state.lastError = `Live fetch failed: ${formatError(error)}`;
+    console.error("Failed to subscribe to NBA scoreboard updates", error);
   }
-
-  updateHeader();
-  renderCurrentMatch();
-}
-
-function cycleMatch() {
-  const matches = getDisplayedMatches();
-
-  if (matches.length <= 1) {
-    if (isWithinRefreshWindow()) {
-      refreshScores({ reason: "manual" });
-    } else {
-      state.lastError = "Manual refresh is paused outside IPL match hours.";
-      updateHeader();
-      renderCurrentMatch();
-    }
-    return;
-  }
-
-  state.activeMatchIndex = (state.activeMatchIndex + 1) % matches.length;
-  renderCurrentMatch();
-}
-
-function toggleSettingsPanel() {
-  const hidden = elements.settingsPanel.classList.toggle("is-hidden");
-  elements.toggleSettings.textContent = hidden ? "API" : "Close";
-
-  if (!hidden) {
-    elements.apiKeyInput.focus();
-    elements.apiKeyInput.select();
-  }
-}
-
-function saveApiKey() {
-  state.apiKey = elements.apiKeyInput.value.trim();
-
-  if (state.apiKey) {
-    window.localStorage.setItem(STORAGE_KEY, state.apiKey);
-  } else {
-    window.localStorage.removeItem(STORAGE_KEY);
-    clearCachedMatches();
-  }
-
-  state.activeMatchIndex = 0;
-  refreshScores({ allowOutsideWindow: true, reason: "setup" });
-}
-
-function init() {
-  if (!validateElements()) {
-    console.error("Overlay UI failed to initialize because one or more required DOM elements were not found.", elements);
-    return;
-  }
-
-  restoreCachedMatches();
-  elements.apiKeyInput.value = state.apiKey;
-  elements.cycleButton.addEventListener("click", cycleMatch);
-  elements.toggleSettings.addEventListener("click", toggleSettingsPanel);
-  elements.saveApiKey.addEventListener("click", saveApiKey);
-  elements.apiKeyInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      saveApiKey();
-    }
-  });
-
-  updateHeader();
-  renderCurrentMatch();
-  refreshScores({ allowOutsideWindow: true, reason: "startup" });
-  window.setInterval(() => {
-    refreshScores({ reason: "auto" });
-  }, REFRESH_INTERVAL_MS);
 }
 
 init();

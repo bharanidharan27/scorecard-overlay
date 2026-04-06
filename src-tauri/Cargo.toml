@@ -1,7 +1,7 @@
 [package]
 name = "scorecard_overlay"
 version = "0.1.0"
-description = "A lightweight always-on-top cricket score overlay"
+description = "A lightweight always-on-top NBA score overlay"
 authors = ["Codex"]
 edition = "2021"
 

@@ -1,44 +1,114 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::time::Duration;
+use std::{sync::Mutex, time::Duration};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager, State};
 
-#[derive(Serialize)]
-struct OverlayMatch {
-    competition: String,
-    current: String,
+const SCOREBOARD_URL: &str = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json";
+const SCORE_EVENT: &str = "nba-scoreboard:update";
+const FETCH_INTERVAL_SECS: u64 = 20;
+
+#[derive(Clone, Serialize)]
+struct NbaTeam {
+    code: String,
+    name: String,
+    score: String,
+    record: String,
+}
+
+#[derive(Clone, Serialize)]
+struct NbaGame {
     id: String,
-    is_live: bool,
-    last_over: String,
-    match_title: String,
-    run_rate: String,
     status: String,
-    batting_overs: String,
-    batting_score: String,
-    batting_team: String,
-    bowling_meta: String,
-    bowling_note: String,
-    bowling_team: String,
+    status_text: String,
+    period: String,
+    clock: String,
+    arena: String,
+    start_time: String,
+    headline: String,
+    series_text: String,
+    away_team: NbaTeam,
+    home_team: NbaTeam,
+}
+
+#[derive(Clone, Serialize)]
+struct ScoreSnapshot {
+    games: Vec<NbaGame>,
+    source: String,
+    updated_at: String,
+}
+
+struct ScoreState {
+    snapshot: Mutex<ScoreSnapshot>,
 }
 
 #[tauri::command]
-async fn fetch_current_matches(api_key: String) -> Result<Vec<OverlayMatch>, String> {
-    if api_key.trim().is_empty() {
-        return Err("Missing API key".to_string());
+fn get_scoreboard_snapshot(state: State<'_, ScoreState>) -> Result<ScoreSnapshot, String> {
+    state
+        .snapshot
+        .lock()
+        .map(|snapshot| snapshot.clone())
+        .map_err(|_| "Failed to access scoreboard snapshot".to_string())
+}
+
+fn empty_snapshot() -> ScoreSnapshot {
+    ScoreSnapshot {
+        games: Vec::new(),
+        source: "nba-live".to_string(),
+        updated_at: "Waiting for NBA feed".to_string(),
+    }
+}
+
+fn spawn_score_worker(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent("scorecard-overlay/0.2")
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                let snapshot = ScoreSnapshot {
+                    games: Vec::new(),
+                    source: "nba-live".to_string(),
+                    updated_at: format!("Client setup failed: {error}"),
+                };
+                publish_snapshot(&app, snapshot);
+                return;
+            }
+        };
+
+        loop {
+            let snapshot = match fetch_scoreboard(&client).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => ScoreSnapshot {
+                    games: Vec::new(),
+                    source: "nba-live".to_string(),
+                    updated_at: error,
+                },
+            };
+
+            publish_snapshot(&app, snapshot);
+            tauri::async_runtime::sleep(Duration::from_secs(FETCH_INTERVAL_SECS)).await;
+        }
+    });
+}
+
+fn publish_snapshot(app: &AppHandle, snapshot: ScoreSnapshot) {
+    if let Some(state) = app.try_state::<ScoreState>() {
+        if let Ok(mut current) = state.snapshot.lock() {
+            *current = snapshot.clone();
+        }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .user_agent("scorecard-overlay/0.1")
-        .build()
-        .map_err(|error| format!("HTTP client setup failed: {error}"))?;
+    let _ = app.emit(SCORE_EVENT, snapshot);
+}
 
+async fn fetch_scoreboard(client: &reqwest::Client) -> Result<ScoreSnapshot, String> {
     let response = client
-        .get("https://api.cricapi.com/v1/currentMatches")
-        .query(&[("apikey", api_key.trim()), ("offset", "0")])
+        .get(SCOREBOARD_URL)
         .send()
         .await
         .map_err(describe_reqwest_error)?;
@@ -47,188 +117,130 @@ async fn fetch_current_matches(api_key: String) -> Result<Vec<OverlayMatch>, Str
     let payload: Value = response
         .json()
         .await
-        .map_err(|error| format!("Invalid API response: {error}"))?;
+        .map_err(|error| format!("Invalid NBA response: {error}"))?;
 
     if !status.is_success() {
-        let reason = payload
-            .get("reason")
-            .and_then(Value::as_str)
-            .filter(|reason| !reason.is_empty())
-            .unwrap_or("Unexpected API error");
-        return Err(format!("HTTP {}: {}", status.as_u16(), reason));
+        return Err(format!("NBA feed returned HTTP {}", status.as_u16()));
     }
 
-    if let Some(reason) = payload.get("reason").and_then(Value::as_str) {
-        if !reason.is_empty() && reason != "success" {
-            return Err(reason.to_string());
-        }
-    }
+    let scoreboard = payload
+        .get("scoreboard")
+        .ok_or_else(|| "NBA feed missing scoreboard field".to_string())?;
 
-    let data = payload
-        .get("data")
+    let games = scoreboard
+        .get("games")
         .and_then(Value::as_array)
-        .ok_or_else(|| "API returned no match data".to_string())?;
+        .ok_or_else(|| "NBA feed missing games array".to_string())?
+        .iter()
+        .map(normalize_game)
+        .collect::<Vec<_>>();
 
-    Ok(data.iter().map(normalize_match).collect())
+    let updated_at = scoreboard
+        .get("gameDate")
+        .and_then(Value::as_str)
+        .map(|date| format!("NBA scoreboard for {date}"))
+        .unwrap_or_else(|| "NBA scoreboard updated".to_string());
+
+    Ok(ScoreSnapshot {
+        games,
+        source: "nba-live".to_string(),
+        updated_at,
+    })
 }
 
 fn describe_reqwest_error(error: reqwest::Error) -> String {
     if error.is_timeout() {
-        return "Network timeout while contacting CricAPI".to_string();
+        return "NBA feed timeout".to_string();
     }
 
     if error.is_connect() {
-        return format!("Network connection failed: {error}");
+        return format!("NBA feed connection failed: {error}");
     }
 
-    if error.is_request() {
-        return format!("Request creation failed: {error}");
-    }
-
-    format!("Network error: {error}")
+    format!("NBA feed error: {error}")
 }
 
-fn normalize_match(raw: &Value) -> OverlayMatch {
-    let id = get_string(raw, &["id", "unique_id", "match_id"]);
-    let match_title = get_string(raw, &["name"]);
-    let competition = get_string(raw, &["series", "series_id", "matchType"]);
-    let status = get_string(raw, &["status"]);
-    let teams = get_team_labels(raw);
+fn normalize_game(raw: &Value) -> NbaGame {
+    let away_team = raw.get("awayTeam").unwrap_or(&Value::Null);
+    let home_team = raw.get("homeTeam").unwrap_or(&Value::Null);
+    let period = raw.get("period").unwrap_or(&Value::Null);
 
-    let scores = raw
-        .get("score")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().collect::<Vec<_>>())
-        .unwrap_or_default();
+    NbaGame {
+        id: get_string(raw, &["gameId"]),
+        status: stringify_value(raw.get("gameStatus").unwrap_or(&Value::Null)),
+        status_text: get_string(raw, &["gameStatusText"]),
+        period: format_period(period),
+        clock: get_string(raw, &["gameClock"]),
+        arena: raw
+            .get("arena")
+            .and_then(|arena| arena.get("arenaName"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        start_time: get_string(raw, &["gameEt"]),
+        headline: format!(
+            "{} at {}",
+            get_team_code(away_team),
+            get_team_code(home_team)
+        ),
+        series_text: raw
+            .get("seriesGameNumber")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        away_team: normalize_team(away_team),
+        home_team: normalize_team(home_team),
+    }
+}
 
-    let batting_entry = scores.last().copied();
-    let other_entry = if scores.len() > 1 {
-        scores.get(scores.len().saturating_sub(2)).copied()
-    } else {
-        None
-    };
+fn normalize_team(raw: &Value) -> NbaTeam {
+    NbaTeam {
+        code: get_team_code(raw),
+        name: raw
+            .get("teamName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        score: stringify_value(raw.get("score").unwrap_or(&Value::Null)),
+        record: format_record(raw),
+    }
+}
 
-    let is_live = raw
-        .get("matchStarted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        && !raw
-            .get("matchEnded")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-
-    let batting_team = batting_entry
-        .and_then(|entry| entry.get("inning"))
+fn get_team_code(raw: &Value) -> String {
+    raw.get("teamTricode")
         .and_then(Value::as_str)
-        .map(clean_inning_name)
-        .and_then(|inning| resolve_team_label(&inning, &teams))
-        .unwrap_or_else(|| teams.first().cloned().unwrap_or_else(|| "TBD".to_string()));
+        .unwrap_or("TBD")
+        .to_string()
+}
 
-    let batting_score = batting_entry
-        .map(format_score)
-        .unwrap_or_else(|| "-".to_string());
+fn format_record(raw: &Value) -> String {
+    let wins = stringify_value(raw.get("wins").unwrap_or(&Value::Null));
+    let losses = stringify_value(raw.get("losses").unwrap_or(&Value::Null));
 
-    let batting_overs = batting_entry
-        .and_then(|entry| entry.get("o"))
-        .map(stringify_value)
-        .filter(|value| !value.is_empty())
-        .map(|overs| format!("{overs} overs"))
-        .unwrap_or_else(|| if is_live { "Overs unavailable".to_string() } else { "Completed innings".to_string() });
+    if wins.is_empty() || losses.is_empty() {
+        return String::new();
+    }
 
-    let bowling_team = resolve_bowling_team(other_entry, &teams, &batting_team);
-    let bowling_note = other_entry
-        .map(format_score)
-        .filter(|value| value != "-")
-        .unwrap_or_else(|| if is_live { "Yet to bat".to_string() } else { "Score unavailable".to_string() });
+    format!("{wins}-{losses}")
+}
 
-    let bowling_meta = if scores.len() >= 2 {
-        "Previous innings".to_string()
-    } else if is_live {
-        status.clone()
-    } else {
-        "Completed match".to_string()
-    };
-
-    let current = raw
-        .get("venue")
+fn format_period(period: &Value) -> String {
+    let number = stringify_value(period.get("current").unwrap_or(&Value::Null));
+    let period_type = period
+        .get("periodType")
         .and_then(Value::as_str)
-        .filter(|venue| !venue.is_empty())
-        .map(|venue| format!("Venue: {venue}"))
-        .unwrap_or_else(|| if is_live { get_string(raw, &["matchType"]) } else { "Completed match".to_string() });
+        .unwrap_or("")
+        .to_ascii_uppercase();
 
-    let run_rate = batting_entry
-        .and_then(|entry| entry.get("runRate"))
-        .map(stringify_value)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| if is_live { "Live".to_string() } else { "Completed".to_string() });
-
-    let last_over = batting_entry
-        .and_then(|entry| entry.get("lastOver"))
-        .map(stringify_value)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| if is_live { "Not provided".to_string() } else { "Completed".to_string() });
-
-    OverlayMatch {
-        competition,
-        current,
-        id,
-        is_live,
-        last_over,
-        match_title,
-        run_rate,
-        status,
-        batting_overs,
-        batting_score,
-        batting_team,
-        bowling_meta,
-        bowling_note,
-        bowling_team,
-    }
-}
-
-fn get_team_labels(raw: &Value) -> Vec<String> {
-    if let Some(team_info) = raw.get("teamInfo").and_then(Value::as_array) {
-        let labels = team_info
-            .iter()
-            .filter_map(|team| {
-                team.get("shortname")
-                    .and_then(Value::as_str)
-                    .or_else(|| team.get("name").and_then(Value::as_str))
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-            })
-            .collect::<Vec<_>>();
-
-        if !labels.is_empty() {
-            return labels;
-        }
+    if number.is_empty() {
+        return String::new();
     }
 
-    raw.get("teams")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
+    if period_type == "OT" {
+        return format!("OT {number}");
+    }
 
-fn resolve_team_label(inning: &str, teams: &[String]) -> Option<String> {
-    let normalized_inning = inning.to_lowercase();
-
-    teams
-        .iter()
-        .find(|team| {
-            let normalized_team = team.to_lowercase();
-            normalized_inning == normalized_team
-                || normalized_inning.starts_with(&normalized_team)
-                || normalized_team.starts_with(&normalized_inning)
-        })
-        .cloned()
+    format!("Q{number}")
 }
 
 fn get_string(raw: &Value, keys: &[&str]) -> String {
@@ -238,55 +250,26 @@ fn get_string(raw: &Value, keys: &[&str]) -> String {
         .to_string()
 }
 
-fn resolve_bowling_team(other_entry: Option<&Value>, teams: &[String], batting_team: &str) -> String {
-    other_entry
-        .and_then(|entry| entry.get("inning"))
-        .and_then(Value::as_str)
-        .map(clean_inning_name)
-        .and_then(|inning| resolve_team_label(&inning, teams))
-        .or_else(|| teams.iter().find(|team| team.as_str() != batting_team).cloned())
-        .unwrap_or_else(|| "TBD".to_string())
-}
-
-fn clean_inning_name(value: &str) -> String {
-    value
-        .replace(" Innings", "")
-        .replace(" Inning", "")
-        .trim()
-        .to_string()
-}
-
-fn format_score(entry: &Value) -> String {
-    let runs = entry.get("r").map(stringify_value).unwrap_or_default();
-    let wickets = entry.get("w").map(stringify_value).unwrap_or_default();
-
-    if runs.is_empty() {
-        return "-".to_string();
-    }
-
-    if wickets.is_empty() {
-        return runs;
-    }
-
-    format!("{runs}/{wickets}")
-}
-
 fn stringify_value(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(text) => text.clone(),
         Value::Number(number) => number.to_string(),
         Value::Bool(flag) => flag.to_string(),
-        _ => value.to_string(),
+        _ => String::new(),
     }
 }
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![fetch_current_matches])
+        .manage(ScoreState {
+            snapshot: Mutex::new(empty_snapshot()),
+        })
+        .invoke_handler(tauri::generate_handler![get_scoreboard_snapshot])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
             let _ = window.set_always_on_top(true);
+            spawn_score_worker(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
