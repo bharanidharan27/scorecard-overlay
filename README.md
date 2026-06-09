@@ -18,7 +18,7 @@ The backend reads the official NBA live scoreboard JSON feed:
 
 - `https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json`
 
-No API key is required.
+No API key is required.sssssssssssss
 
 ## Run the app
 
